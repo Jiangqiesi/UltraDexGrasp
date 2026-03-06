@@ -13,7 +13,7 @@
 
 <div id="top" align="center">
 
-[![arXiv](https://img.shields.io/badge/arXiv-XXXX.XXXXX-green)](https://arxiv.org/abs/XXXX.XXXXX)
+[![arXiv](https://img.shields.io/badge/arXiv-2603.05312-green)](https://arxiv.org/abs/2603.05312)
 [![Homepage](https://img.shields.io/badge/Homepage-%F0%9F%8C%90-blue)](https://yangsizhe.github.io/ultradexgrasp/)
 
 </div>
@@ -136,7 +136,7 @@ If you find our work helpful, please cite:
 @article{yang2026ultradexgrasp,
   title={UltraDexGrasp: Learning Universal Dexterous Grasping for Bimanual Robots with Synthetic Data},
   author={Yang, Sizhe and Xie, Yiman and Liang, Zhixuan and Tian, Yang and Zeng, Jia and Lin, Dahua and Pang, Jiangmiao},
-  journal={arXiv preprint arXiv:XXXX.XXXXX},
+  journal={arXiv preprint arXiv:2603.05312},
   year={2026}
 }
 ```
