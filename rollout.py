@@ -34,21 +34,52 @@ np.random.seed(42)
 pregrasp_distance = 0.1
 
 
-def rollout_for_an_object(env, hand, object_scale):
+def _build_state(obs_t, hand_mode):
+    """Per-step low-dim state. qpos is primary; ee_pose appended as auxiliary feature."""
+    if hand_mode in (0, 3):
+        return np.concatenate([obs_t['robot_0']['qpos'], obs_t['robot_0']['ee_pose']]).astype(np.float32)
+    if hand_mode in (1, 4):
+        return np.concatenate([obs_t['robot_1']['qpos'], obs_t['robot_1']['ee_pose']]).astype(np.float32)
+    # bimanual
+    return np.concatenate([
+        obs_t['robot_0']['qpos'], obs_t['robot_0']['ee_pose'],
+        obs_t['robot_1']['qpos'], obs_t['robot_1']['ee_pose'],
+    ]).astype(np.float32)
+
+
+def _build_action(joint_action, hand_mode):
+    """Slice the 36D joint command to the active half for single-arm modes."""
+    if hand_mode in (0, 3):
+        return joint_action[:18].astype(np.float32)
+    if hand_mode in (1, 4):
+        return joint_action[18:].astype(np.float32)
+    return joint_action.astype(np.float32)
+
+
+def _save_episode_npz(out_path, episode_data, meta):
+    arrays = {k: np.stack(v, axis=0) for k, v in episode_data.items()}
+    arrays['meta'] = np.array(json.dumps(meta), dtype=object)
+    np.savez_compressed(out_path, **arrays)
+
+
+def rollout_for_an_object(env, hand, object_scale, object_mesh_path, output_dir='.'):
     if hand == 3 or hand == 4:
         grasp_mode = copy.deepcopy(hand)
         hand -= 3
     else:
         grasp_mode = hand
     kin_model, ik_solver, motion_gen_common, motion_gen_lift = setup_curobo_utils(config_path=config['asset_path'], is_bimanual=hand == 2, left_motion_gen_config_path=config['robot']['ur5e_with_left_hand']['curobo_motion_gen_config_path'], right_motion_gen_config_path=config['robot']['ur5e_with_right_hand']['curobo_motion_gen_config_path'], left_ik_solver_config_path=config['robot']['ur5e_with_left_hand']['curobo_ik_solver_config_path'], right_ik_solver_config_path=config['robot']['ur5e_with_right_hand']['curobo_ik_solver_config_path'])
-    env.set_object_path_and_scale_and_hand(f"{config['object_mesh_path']}/mesh/simplified.obj", object_scale, hand, config['xy_step_str'])
+    env.set_object_path_and_scale_and_hand(f"{object_mesh_path}/mesh/simplified.obj", object_scale, hand, config['xy_step_str'])
 
     episode_idx = 0
     step_idx = 0
     stage_idx = 0  # 0 init to pregrasp, 1 pregrasp to grasp, 2 grasp to squeeze, 3 squeeze to lift
     step_in_stage_idx = 0
     image_list = []
+    episode_data = None
+    stage_boundaries = []
     num_episode = eval(config['xy_step_str'])[0] * eval(config['xy_step_str'])[1]
+    object_name = os.path.basename(object_mesh_path.rstrip('/'))
 
     while True:
         if episode_idx >= num_episode:
@@ -56,6 +87,16 @@ def rollout_for_an_object(env, hand, object_scale):
 
         if step_idx == 0:
             image_list = []
+            episode_data = {
+                'point_cloud': [],
+                'point_cloud_mask': [],
+                'agent_pos': [],
+                'action': [],
+                'object_pose': [],
+                'rgb_primary_0': [],
+                'rgb_primary_1': [],
+            }
+            stage_boundaries = [0]
 
             obs = env.reset(episode_idx)
             while not env.is_object_in_boundary(env.get_object_pose()):
@@ -89,7 +130,7 @@ def rollout_for_an_object(env, hand, object_scale):
                 "mesh": {
                     "object": {
                         "pose": object_pose.tolist(),
-                        "file_path": f"{config['object_mesh_path']}/mesh/simplified.obj",
+                        "file_path": f"{object_mesh_path}/mesh/simplified.obj",
                         "scale": [object_scale] * 3
                     },
                 },
@@ -113,7 +154,7 @@ def rollout_for_an_object(env, hand, object_scale):
             env.robot_world[1].clear_world_cache()
             env.robot_world[1].update_world(WorldConfig.from_dict(world_config))
 
-            data_all = grasp_synthesizer.synthesize_grasp(f"{config['object_mesh_path']}", object_pose.tolist(), object_scale)
+            data_all = grasp_synthesizer.synthesize_grasp(f"{object_mesh_path}", object_pose.tolist(), object_scale)
 
             # find best grasp
             if hand == 0 or hand == 1:
@@ -485,8 +526,17 @@ def rollout_for_an_object(env, hand, object_scale):
             joint_action_1 = np.concatenate([traj[1][step_in_stage_idx].cpu().numpy(), qposes[1][step_in_stage_idx]])
         joint_action = np.concatenate([joint_action_0, joint_action_1])
 
-        obs = env.get_obs()  # ensure the obs is updated
+        obs = env.get_obs()  # ensure the obs is updated; same instance reused below to avoid double sampling
         image_list.append(obs['Primary_0']['color_image'])
+
+        # record (s_t, a_t) BEFORE stepping; reuse this same obs for both video and dataset
+        episode_data['point_cloud'].append(obs['point_cloud'])
+        episode_data['point_cloud_mask'].append(obs['point_cloud_mask'])
+        episode_data['agent_pos'].append(_build_state(obs, grasp_mode))
+        episode_data['action'].append(_build_action(joint_action, grasp_mode))
+        episode_data['object_pose'].append(env.get_object_pose().astype(np.float32))
+        episode_data['rgb_primary_0'].append(obs['Primary_0']['color_image'])
+        episode_data['rgb_primary_1'].append(obs['Primary_1']['color_image'])
 
         obs = env.step(joint_action)
 
@@ -509,9 +559,34 @@ def rollout_for_an_object(env, hand, object_scale):
         if step_in_stage_idx == traj[0].shape[0]:
             stage_idx += 1
             step_in_stage_idx = 0
+            stage_boundaries.append(step_idx)
 
         if stage_idx > 3:
-            save_rgb_images_to_video(image_list, f'demo_{episode_idx}_{obs["success"]}.mp4')
+            os.makedirs(output_dir, exist_ok=True)
+            success = bool(obs['success'])
+            save_rgb_images_to_video(image_list, os.path.join(output_dir, f'demo_{episode_idx}_{success}.mp4'))
+
+            if success:
+                meta = {
+                    'episode_idx': int(episode_idx),
+                    'hand_mode': int(hand if grasp_mode in (3, 4) else grasp_mode),  # executed hand: 0/1/2
+                    'bodex_mode': int(grasp_mode),  # original 0/1/2/3/4
+                    'object_mesh_path': str(object_mesh_path),
+                    'object_name': object_name,
+                    'object_scale': float(object_scale),
+                    'object_init_pose': env.object_init_pose.tolist(),
+                    'object_final_pose': env.get_object_pose().tolist(),
+                    'success': True,
+                    'control_hz': int(env.control_hz),
+                    'num_steps': int(step_idx),
+                    'stage_boundaries': stage_boundaries,
+                    'state_layout': 'qpos(18)+ee_pose(7)' if grasp_mode != 2 else 'qpos(18)+ee_pose(7)+qpos(18)+ee_pose(7)',
+                    'action_layout': 'arm(6)+hand(12)' if grasp_mode != 2 else 'arm(6)+hand(12)+arm(6)+hand(12)',
+                }
+                _save_episode_npz(
+                    os.path.join(output_dir, f'episode_{episode_idx:05d}.npz'),
+                    episode_data, meta,
+                )
 
             episode_idx += 1; step_idx = 0; stage_idx = 0; step_in_stage_idx = 0
 
@@ -519,10 +594,85 @@ def rollout_for_an_object(env, hand, object_scale):
 @click.command()
 @click.option('--hand', required=True, type=int)
 @click.option('--object_scale_list', required=True, type=str)
-def main(hand, object_scale_list):
+@click.option('--object-root', default=None, type=str, help='Root dir for batch scanning, e.g. asset/object_mesh')
+@click.option('--object-names', default=None, type=str, help='Comma-separated subset of object names to process')
+@click.option('--output-root', default='outputs/batch_run', type=str, help='Root output dir for batch mode')
+def main(hand, object_scale_list, object_root, object_names, output_root):
+    import json as _json
+    import traceback
+
+    scale_list = eval(object_scale_list)
     env = BaseEnv(config)
-    for object_scale in eval(object_scale_list):
-        rollout_for_an_object(env, hand, object_scale)
+
+    if object_root is None:
+        # single-object legacy mode
+        object_mesh_path = config['object_mesh_path']
+        for object_scale in scale_list:
+            rollout_for_an_object(env, hand, object_scale, object_mesh_path)
+        return
+
+    # batch mode
+    object_root_abs = os.path.join(os.path.dirname(os.path.abspath(__file__)), object_root) if not os.path.isabs(object_root) else object_root
+
+    # scan valid objects
+    all_dirs = sorted(os.listdir(object_root_abs))
+    if object_names:
+        requested = [n.strip() for n in object_names.split(',')]
+        all_dirs = [d for d in all_dirs if d in requested]
+
+    valid_objects = []
+    skipped_objects = []
+    for d in all_dirs:
+        mesh_path = os.path.join(object_root_abs, d, 'mesh', 'simplified.obj')
+        if os.path.isfile(mesh_path):
+            valid_objects.append(d)
+        else:
+            skipped_objects.append(d)
+            print(f'[SKIP] {d}: mesh/simplified.obj not found')
+
+    print(f'Found {len(valid_objects)} valid objects, skipped {len(skipped_objects)}')
+
+    batch_results = {'processed': [], 'skipped': skipped_objects, 'failed': []}
+
+    for obj_name in valid_objects:
+        obj_dir = os.path.join(object_root_abs, obj_name)
+        obj_results = {'object': obj_name, 'scales': {}}
+
+        for scale in scale_list:
+            scale_tag = f'scale_{scale}'
+            output_dir = os.path.join(output_root, obj_name, scale_tag)
+            print(f'\n=== Processing {obj_name} @ scale={scale} -> {output_dir} ===')
+            try:
+                rollout_for_an_object(env, hand, scale, obj_dir, output_dir)
+                obj_results['scales'][scale_tag] = 'success'
+            except Exception as e:
+                msg = f'{type(e).__name__}: {e}'
+                print(f'[FAIL] {obj_name} @ {scale}: {msg}')
+                traceback.print_exc()
+                obj_results['scales'][scale_tag] = f'failed: {msg}'
+                batch_results['failed'].append({'object': obj_name, 'scale': scale, 'error': msg})
+
+        # per-object summary
+        os.makedirs(os.path.join(output_root, obj_name), exist_ok=True)
+        with open(os.path.join(output_root, obj_name, 'summary.json'), 'w') as f:
+            _json.dump(obj_results, f, indent=2)
+
+        batch_results['processed'].append(obj_name)
+
+    # batch summary
+    os.makedirs(output_root, exist_ok=True)
+    summary = {
+        'total_objects': len(valid_objects) + len(skipped_objects),
+        'processed': len(batch_results['processed']),
+        'skipped': len(batch_results['skipped']),
+        'failed_count': len(batch_results['failed']),
+        'skipped_objects': batch_results['skipped'],
+        'failed_details': batch_results['failed'],
+    }
+    with open(os.path.join(output_root, 'batch_summary.json'), 'w') as f:
+        _json.dump(summary, f, indent=2)
+    print(f'\nBatch done: {summary["processed"]} processed, {summary["skipped"]} skipped, {summary["failed_count"]} failed')
+    print(f'Summary: {os.path.join(output_root, "batch_summary.json")}')
 
 
 if __name__ == '__main__':
