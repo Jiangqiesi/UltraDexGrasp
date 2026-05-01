@@ -54,7 +54,18 @@ python scripts/npz_to_zarr.py \
 3. 对每个 episode：合成抓取姿态 → IK 可达性过滤 → 碰撞过滤 → 按距离排序选最优抓取
 4. 四阶段轨迹执行：init→pregrasp（带碰撞避障运动规划）→ grasp（接近）→ squeeze（合手指）→ lift（抬升）
 5. 每阶段用 cuRobo MotionGen 规划臂部轨迹，手指关节线性插值
-6. 成功判定：物体 z 坐标抬升 > 0.1m，输出 `demo_{idx}_{success}.mp4` + `episode_{idx:05d}.npz`（仅成功）
+6. 成功判定：物体 z 坐标抬升 > 0.1m，输出 `demo_{idx}_{success}.mp4` + `episode_{idx:05d}.npz`（仅成功） + `episode_{idx:05d}.done`（所有终止路径，用于断点续传）
+
+### 断点续传
+
+批量模式下每个 episode 在**任何**终止路径（早期过滤、运动规划失败、物体移动、正常结束）都会写一个空的 `episode_{idx:05d}.done` 标记。重新运行同一命令时，`_get_completed_episodes()` 扫描 `output_dir/episode_*.done`，已标记的 episode 直接跳过（不调用 `env.reset()` 和 grasp synthesis）。
+
+- 跳过粒度：成功和失败的 episode 都跳过（避免确定性失败的网格位置反复重试）
+- 仅 batch 模式（`--object-root`）启用，单物体 legacy 模式不扫描（因为输出无 object/scale 子目录隔离）
+- **迁移老数据**：本机制之前生成的数据没有 `.done` 标记，重跑会覆盖。为已有 `demo_*.mp4` 回填标记的一行命令：
+  ```bash
+  python3 -c "import os,re,glob; [open(os.path.join(os.path.dirname(p), f'episode_{int(re.match(r\"demo_(\d+)_\", os.path.basename(p)).group(1)):05d}.done'),'w').close() for p in glob.glob('outputs/batch_run/**/demo_*.mp4', recursive=True)]"
+  ```
 
 ### 关键模块关系
 

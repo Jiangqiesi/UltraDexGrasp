@@ -62,7 +62,21 @@ def _save_episode_npz(out_path, episode_data, meta):
     np.savez_compressed(out_path, **arrays)
 
 
-def rollout_for_an_object(env, hand, object_scale, object_mesh_path, output_dir='.'):
+def _mark_episode_done(output_dir, episode_idx):
+    open(os.path.join(output_dir, f'episode_{episode_idx:05d}.done'), 'w').close()
+
+
+def _get_completed_episodes(output_dir):
+    import glob, re
+    done = set()
+    for f in glob.glob(os.path.join(output_dir, 'episode_*.done')):
+        m = re.match(r'episode_(\d+)\.done$', os.path.basename(f))
+        if m:
+            done.add(int(m.group(1)))
+    return done
+
+
+def rollout_for_an_object(env, hand, object_scale, object_mesh_path, output_dir='.', skip_episodes=None):
     if hand == 3 or hand == 4:
         grasp_mode = copy.deepcopy(hand)
         hand -= 3
@@ -80,12 +94,17 @@ def rollout_for_an_object(env, hand, object_scale, object_mesh_path, output_dir=
     stage_boundaries = []
     num_episode = eval(config['xy_step_str'])[0] * eval(config['xy_step_str'])[1]
     object_name = os.path.basename(object_mesh_path.rstrip('/'))
+    os.makedirs(output_dir, exist_ok=True)
 
     while True:
         if episode_idx >= num_episode:
             break
 
         if step_idx == 0:
+            if skip_episodes and episode_idx in skip_episodes:
+                print(f'[RESUME] episode {episode_idx} already done, skipping')
+                episode_idx += 1
+                continue
             image_list = []
             episode_data = {
                 'point_cloud': [],
@@ -176,6 +195,7 @@ def rollout_for_an_object(env, hand, object_scale, object_mesh_path, output_dir=
                 ik_success = result.success
                 if ik_success.sum() == 0:
                     print('all data are filtered out')
+                    _mark_episode_done(output_dir, episode_idx)
                     episode_idx += 1; step_idx = 0; stage_idx = 0; step_in_stage_idx = 0; continue
                 q_arm_pregrasp = result.solution[ik_success]
                 data_all = data_all[ik_success.squeeze(dim=-1).cpu().numpy()]
@@ -190,6 +210,7 @@ def rollout_for_an_object(env, hand, object_scale, object_mesh_path, output_dir=
                 without_collision = (d_world <= 0).cpu().numpy()
                 if without_collision.sum() == 0:
                     print('all data are filtered out')
+                    _mark_episode_done(output_dir, episode_idx)
                     episode_idx += 1; step_idx = 0; stage_idx = 0; step_in_stage_idx = 0; continue
                 data_all = data_all[without_collision]
                 print(len(data_all), 'pregrasp coll')
@@ -200,6 +221,7 @@ def rollout_for_an_object(env, hand, object_scale, object_mesh_path, output_dir=
                 ik_success = result.success
                 if ik_success.sum() == 0:
                     print('all data are filtered out')
+                    _mark_episode_done(output_dir, episode_idx)
                     episode_idx += 1; step_idx = 0; stage_idx = 0; step_in_stage_idx = 0; continue
                 q_arm_grasp = result.solution[ik_success]
                 data_all = data_all[ik_success.squeeze(dim=-1).cpu().numpy()]
@@ -236,6 +258,7 @@ def rollout_for_an_object(env, hand, object_scale, object_mesh_path, output_dir=
                 ik_success = result.success
                 if ik_success.sum() == 0:
                     print('all data are filtered out')
+                    _mark_episode_done(output_dir, episode_idx)
                     episode_idx += 1; step_idx = 0; stage_idx = 0; step_in_stage_idx = 0; continue
                 q_arm_left = result.solution[ik_success]
                 data_all = data_all[ik_success.squeeze(dim=-1).cpu().numpy()]
@@ -244,6 +267,7 @@ def rollout_for_an_object(env, hand, object_scale, object_mesh_path, output_dir=
                 ik_success = result.success
                 if ik_success.sum() == 0:
                     print('all data are filtered out')
+                    _mark_episode_done(output_dir, episode_idx)
                     episode_idx += 1; step_idx = 0; stage_idx = 0; step_in_stage_idx = 0; continue
                 q_arm_left = q_arm_left[ik_success.squeeze(dim=-1)]
                 q_arm_right = result.solution[ik_success]
@@ -257,6 +281,7 @@ def rollout_for_an_object(env, hand, object_scale, object_mesh_path, output_dir=
                 without_collision = (d_world <= 0.005).cpu().numpy()
                 if without_collision.sum() == 0:
                     print('all data are filtered out')
+                    _mark_episode_done(output_dir, episode_idx)
                     episode_idx += 1; step_idx = 0; stage_idx = 0; step_in_stage_idx = 0; continue
                 q_arm_right = q_arm_right[without_collision]
                 data_all = data_all[without_collision]
@@ -267,6 +292,7 @@ def rollout_for_an_object(env, hand, object_scale, object_mesh_path, output_dir=
                 without_collision = (d_world <= 0.005).cpu().numpy()
                 if without_collision.sum() == 0:
                     print('all data are filtered out')
+                    _mark_episode_done(output_dir, episode_idx)
                     episode_idx += 1; step_idx = 0; stage_idx = 0; step_in_stage_idx = 0; continue
                 data_all = data_all[without_collision]
                 print(len(data_all), 'pregrasp coll right')
@@ -389,6 +415,7 @@ def rollout_for_an_object(env, hand, object_scale, object_mesh_path, output_dir=
                 )
                 if result.success == False:
                     print(f"episode{episode_idx} stage{stage_idx} Trajectory Failed")
+                    _mark_episode_done(output_dir, episode_idx)
                     episode_idx += 1; step_idx = 0; stage_idx = 0; step_in_stage_idx = 0; continue
                 traj = result.get_interpolated_plan().position
                 # adjust the length of the trajectory
@@ -407,6 +434,7 @@ def rollout_for_an_object(env, hand, object_scale, object_mesh_path, output_dir=
                     traj = get_interpolated_trajectory(traj.unsqueeze(0), out_traj_state, kind=InterpolateType.LINEAR)[0][0].position
                 except:
                     print(f"get_interpolated_trajectory failed. Maybe caused by floating precision.")
+                    _mark_episode_done(output_dir, episode_idx)
                     episode_idx += 1; step_idx = 0; stage_idx = 0; step_in_stage_idx = 0; continue
 
                 # remove the pause
@@ -450,6 +478,7 @@ def rollout_for_an_object(env, hand, object_scale, object_mesh_path, output_dir=
                 )
                 if result_left.success == False or result_right.success == False:
                     print(f"episode{episode_idx} stage{stage_idx} Trajectory Failed")
+                    _mark_episode_done(output_dir, episode_idx)
                     episode_idx += 1; step_idx = 0; stage_idx = 0; step_in_stage_idx = 0; continue
                 traj_left = result_left.get_interpolated_plan().position
                 traj_right = result_right.get_interpolated_plan().position
@@ -475,6 +504,7 @@ def rollout_for_an_object(env, hand, object_scale, object_mesh_path, output_dir=
                     traj_right = get_interpolated_trajectory(traj_right.unsqueeze(0), out_traj_state_right, kind=InterpolateType.LINEAR)[0][0].position
                 except:
                     print(f"get_interpolated_trajectory failed. Maybe caused by floating precision.")
+                    _mark_episode_done(output_dir, episode_idx)
                     episode_idx += 1; step_idx = 0; stage_idx = 0; step_in_stage_idx = 0; continue
 
                 # remove the pause
@@ -542,16 +572,19 @@ def rollout_for_an_object(env, hand, object_scale, object_mesh_path, output_dir=
 
         if stage_idx < 2 and env.check_object_moved():
             print('object moved, filtered out')
+            _mark_episode_done(output_dir, episode_idx)
             episode_idx += 1; step_idx = 0; stage_idx = 0; step_in_stage_idx = 0; continue
 
         # filter out trajectories in which EE pos moves backward or upward
         if hand == 0 or hand == 1:
             if obs[f'robot_{hand}']['ee_pose'][0] < init_ee_pose[hand][0] - 0.3 or obs[f'robot_{hand}']['ee_pose'][2] > init_ee_pose[hand][2] + 0.15:
                 print('redundant motion, filtered out')
+                _mark_episode_done(output_dir, episode_idx)
                 episode_idx += 1; step_idx = 0; stage_idx = 0; step_in_stage_idx = 0; continue
         elif hand == 2:
             if obs['robot_0']['ee_pose'][0] < init_ee_pose[0][0] - 0.3 or obs['robot_0']['ee_pose'][2] > init_ee_pose[0][2] + 0.15 or obs['robot_1']['ee_pose'][0] < init_ee_pose[1][0] - 0.3 or obs['robot_1']['ee_pose'][2] > init_ee_pose[1][2] + 0.15:
                 print('redundant motion, filtered out')
+                _mark_episode_done(output_dir, episode_idx)
                 episode_idx += 1; step_idx = 0; stage_idx = 0; step_in_stage_idx = 0; continue
 
         step_idx += 1
@@ -588,6 +621,7 @@ def rollout_for_an_object(env, hand, object_scale, object_mesh_path, output_dir=
                     episode_data, meta,
                 )
 
+            _mark_episode_done(output_dir, episode_idx)
             episode_idx += 1; step_idx = 0; stage_idx = 0; step_in_stage_idx = 0
 
 
@@ -641,9 +675,12 @@ def main(hand, object_scale_list, object_root, object_names, output_root):
         for scale in scale_list:
             scale_tag = f'scale_{scale}'
             output_dir = os.path.join(output_root, obj_name, scale_tag)
+            skip_episodes = _get_completed_episodes(output_dir)
+            if skip_episodes:
+                print(f'  [RESUME] {len(skip_episodes)} episodes already done, skipping: {sorted(skip_episodes)}')
             print(f'\n=== Processing {obj_name} @ scale={scale} -> {output_dir} ===')
             try:
-                rollout_for_an_object(env, hand, scale, obj_dir, output_dir)
+                rollout_for_an_object(env, hand, scale, obj_dir, output_dir, skip_episodes=skip_episodes)
                 obj_results['scales'][scale_tag] = 'success'
             except Exception as e:
                 msg = f'{type(e).__name__}: {e}'
