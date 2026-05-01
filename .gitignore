@@ -18,3 +18,5 @@ third_party/
 asset/
 
 tmp.*
+
+.DS_Store

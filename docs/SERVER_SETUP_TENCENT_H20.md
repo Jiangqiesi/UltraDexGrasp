@@ -142,9 +142,11 @@ export MAX_JOBS=16
 ```bash
 uv pip install numpy==1.25.2
 uv pip install -r requirements.txt
-uv pip install coal pybind11
+uv pip install coal pybind11 cmeel-eigen
 uv pip install torch-scatter -f https://data.pyg.org/whl/torch-2.4.1+cu124.html
 ```
+
+`cmeel-eigen` 会把 Eigen 头文件安装到 `.venv/lib/python3.10/site-packages/cmeel.prefix/include/eigen3`。BODex 的 COAL OpenMP wrapper 编译时会通过 `#include <Eigen/Core>` 使用它。
 
 如果系统没有 `ffmpeg`，使用 Python wheel 兜底：
 
@@ -346,6 +348,31 @@ cd third_party/BODex_api/src/bodex/geom/cpp
 python setup.py install
 cd -
 ```
+
+### `fatal error: Eigen/Core: No such file or directory`
+
+这是缺少 Eigen 头文件。pip 安装的 `coal` 会把 COAL 放到 `cmeel.prefix`，但不一定同时带上 Eigen headers。补装 `cmeel-eigen` 后清掉旧 build 目录再重编：
+
+```bash
+source env/activate_uv.sh
+uv pip install cmeel-eigen
+
+python - <<'PY'
+from pathlib import Path
+import coal
+
+prefix = Path(coal.__file__).resolve().parents[4]
+print(prefix)
+print((prefix / "include/eigen3/Eigen/Core").exists())
+PY
+
+cd third_party/BODex_api/src/bodex/geom/cpp
+rm -rf build
+python setup.py install
+cd -
+```
+
+上面的检查应打印 `True`。
 
 ### 找不到 `ffmpeg`
 
