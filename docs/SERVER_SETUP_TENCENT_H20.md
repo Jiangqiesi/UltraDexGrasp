@@ -53,7 +53,7 @@
 dnf install -y \
   git git-lfs gcc gcc-c++ make cmake ninja-build \
   libgomp mesa-libGL glib2 libX11 libXext libXrender libSM libICE \
-  vulkan-loader vulkan-tools
+  libglvnd libglvnd-egl mesa-libEGL vulkan-loader vulkan-tools
 
 git lfs install
 ```
@@ -96,7 +96,8 @@ uv python install 3.10
 uv venv .venv --python 3.10
 source .venv/bin/activate
 
-uv pip install -U pip setuptools wheel packaging ninja cmake pybind11
+uv pip install -U pip wheel packaging ninja cmake pybind11
+uv pip install "setuptools<70"
 ```
 
 不要把依赖装进系统 Python。服务器是 root 环境时尤其要避免污染全局环境。
@@ -397,6 +398,64 @@ find /usr/share/vulkan/icd.d /etc/vulkan/icd.d -name '*nvidia*.json' -print 2>/d
 ```
 
 如果没有 NVIDIA ICD JSON，通常需要管理员补齐 NVIDIA Vulkan driver/runtime 组件。
+
+如果 SAPIEN import 阶段直接报：
+
+```text
+FileNotFoundError: /usr/share/glvnd/egl_vendor.d
+```
+
+说明 GLVND EGL vendor 目录缺失。先补系统包和目录：
+
+```bash
+dnf install -y libglvnd libglvnd-egl mesa-libEGL vulkan-loader vulkan-tools || \
+  yum install -y libglvnd libglvnd-egl mesa-libEGL vulkan-loader vulkan-tools
+
+mkdir -p /usr/share/glvnd/egl_vendor.d
+mkdir -p /usr/share/vulkan/icd.d
+```
+
+然后检查 NVIDIA EGL/Vulkan runtime 是否存在：
+
+```bash
+ldconfig -p | grep -E 'libEGL_nvidia|libGLX_nvidia|libvulkan'
+find /usr/share/glvnd/egl_vendor.d /etc/glvnd/egl_vendor.d \
+     /usr/share/vulkan/icd.d /etc/vulkan/icd.d \
+     -maxdepth 1 -type f -print 2>/dev/null
+```
+
+如果有 `libEGL_nvidia.so.0`，但没有 EGL vendor JSON，可以创建：
+
+```bash
+cat >/usr/share/glvnd/egl_vendor.d/10_nvidia.json <<'EOF'
+{
+  "file_format_version": "1.0.0",
+  "ICD": {
+    "library_path": "libEGL_nvidia.so.0"
+  }
+}
+EOF
+
+export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json
+```
+
+如果没有 `libEGL_nvidia.so.0` 或 `libGLX_nvidia.so.0`，Python 侧无法修复，需要服务器管理员补齐 NVIDIA driver 的 EGL/Vulkan runtime 组件。
+
+### `ModuleNotFoundError: No module named 'pkg_resources'`
+
+`sapien==3.0.0b1` import 时会用到 `pkg_resources`，它由 `setuptools` 提供。uv 新建的环境不一定默认带它，或新版 setuptools 行为可能变化。固定一个兼容版本：
+
+```bash
+source env/activate_uv.sh
+uv pip install "setuptools<70"
+
+python - <<'PY'
+import pkg_resources
+import sapien
+print("pkg_resources ok")
+print("sapien ok", sapien.__file__)
+PY
+```
 
 ## 参考依据
 
